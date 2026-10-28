@@ -29,14 +29,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 wgpu = "30"
-pollster = "0.4"
+pollster = "1.0"
 raw-window-handle = "0.6"
-jni = { version = "0.21", default-features = false }
+jni = { version = "0.22", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk = { version = "0.9", default-features = false, features = ["nativewindow", "rwh_06", "api-level-26"] }
 ndk-sys = "0.6"
-android_logger = "0.14"
+android_logger = "0.15"
 
 # cargo-ndk configuration for building jniLibs directly for Gradle
 [package.metadata.cargo-ndk]
