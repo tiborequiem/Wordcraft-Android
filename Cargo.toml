@@ -80,8 +80,7 @@ egui_extras = { version = "0.36", default-features = false }
 eframe = { version = "0.36", default-features = false }
 egui_kittest = "0.36"
 rfd = "0.17"
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
-
+arboard = { path = "vendor/arboard", features = ["wayland-data-control"] }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
@@ -106,3 +105,8 @@ debug = 0
 # Required by craft-pdf: the backend rejects writers that failed during unwinding.
 [patch.crates-io]
 krilla = { git = "https://github.com/storytold/craft-libs", rev = "c3487320b2d1de657b860b3c8abb44e1f2b32bd8" }
+egui-winit = { path = "vendor/egui-winit" }
+rfd = { path = "vendor/rfd" }
+winit = { path = "vendor/winit" }
+egui-wgpu = { path = "vendor/egui-wgpu" }
+android-activity = { path = "vendor/android-activity" }

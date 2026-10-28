@@ -659,6 +659,8 @@ pub struct WordApp {
     no_document: Option<u64>,
     /// Comment and reply text typed but not yet written to the document (#1348).
     pub(crate) comment_drafts: panes::CommentDrafts,
+    /// Set when a canvas gesture or scroll requests the soft keyboard to hide immediately on Android.
+    pub request_ime_hide: bool,
 }
 
 /// The answer to "Do you want to save changes?" (`ui.saveChanges`).
@@ -760,6 +762,7 @@ impl WordApp {
             recovery_seen: false,
             no_document: None,
             comment_drafts: Default::default(),
+            request_ime_hide: false,
         }
     }
 

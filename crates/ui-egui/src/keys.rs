@@ -654,6 +654,16 @@ fn delete_surrounding(app: &mut WordApp, before: usize, after: usize) {
     let start = f.off.saturating_sub(head.chars().rev().take(before).map(char::len_utf8).sum::<usize>());
     let end = f.off.saturating_add(tail.chars().take(after).map(char::len_utf8).sum::<usize>());
     if start == end {
+        // The one character before the caret is the paragraph mark, which the paragraph's text does
+        // not contain. Backspace there joins with the paragraph above, exactly as the key does on a
+        // desktop; a list item loses its number or indent first. A bigger count is a correction at
+        // the paragraph start, not a Backspace over the mark, so it still erases nothing.
+        if before == 1 && after == 0 && f.off == 0 {
+            if app.session.typing_open() {
+                app.session.join_next_undo();
+            }
+            let _ = app.run("text.backspace", json!({}));
+        }
         return;
     }
     let join = s.typing_open();
@@ -1173,6 +1183,36 @@ mod tests {
         assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body).trim_end(), "one\n\nthree");
         alt_frame(&ctx, &mut a, vec![surround(5, 5), egui::Event::Text("2".into())]);
         assert_eq!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body).trim_end(), "one\n2\nthree");
+    }
+
+    /// A phone's Backspace at the start of a paragraph arrives as `DeleteSurrounding(1, 0)`, not as
+    /// a `Key::Backspace`. The character it means is the paragraph mark, which is not part of the
+    /// paragraph's text, so the paragraphs have to be joined explicitly — otherwise Enter could never
+    /// be taken back on a phone.
+    #[test]
+    fn delete_surrounding_at_a_paragraph_start_joins_it_with_the_one_above() {
+        let (ctx, mut a) = alt_frame_app();
+        a.run("document.setText", json!({"text": "one\ntwo"})).unwrap();
+        // The caret at the start of `two` (after `one` and its paragraph mark).
+        a.run("caret.docStart", json!({})).unwrap();
+        for _ in 0..4 {
+            a.run("caret.right", json!({})).unwrap();
+        }
+        alt_frame(&ctx, &mut a, vec![surround(1, 0)]);
+        assert_eq!(body(&a), "onetwo");
+        // At the very start of the story there is no paragraph above: it still erases nothing.
+        a.run("caret.docStart", json!({})).unwrap();
+        alt_frame(&ctx, &mut a, vec![surround(1, 0)]);
+        assert_eq!(body(&a), "onetwo");
+        // A correction erasing several characters from the paragraph start is not a Backspace over
+        // the mark, so it must not join the paragraphs.
+        a.run("document.setText", json!({"text": "one\ntwo"})).unwrap();
+        a.run("caret.docStart", json!({})).unwrap();
+        for _ in 0..4 {
+            a.run("caret.right", json!({})).unwrap();
+        }
+        alt_frame(&ctx, &mut a, vec![surround(2, 0), egui::Event::Text("X".into())]);
+        assert_eq!(body(&a), "one\nXtwo");
     }
 
     /// The agent's rewrite belongs to the typing it corrects: one Undo takes back the typing

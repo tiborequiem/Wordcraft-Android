@@ -1,226 +1,252 @@
-//! Android Soft Keyboard (IME) and WindowInsets Bridge.
-//!
-//! Handles:
-//! - WindowInsets integration (keyboard height, status/nav bar insets).
-//! - Viewport auto-scroll so the caret is never occluded by the soft keyboard.
-//! - IME composition and commit events for swipe typing, predictive text, and multi-language input.
-//! - Text context extraction around caret (`getTextBeforeCursor`, `getTextAfterCursor`, `getSelectedText`)
-//!   for Gboard autocompletion and next-word prediction.
-//! - Transactional batch editing grouping continuous swipe input into single clean undo steps.
+// Builder-generated Android soft-keyboard (IME) bridge (shared module).
+//
+// A bare NativeActivity has no editable view, so Android's InputMethodManager cannot reliably show
+// the soft keyboard and never delivers typed text. The generated Activity (see
+// templates/android/SafActivity.java) installs a tiny, invisible but focusable `EditText` whose real
+// InputConnection fixes both: the shell calls `imeShow`/`imeHide` through the vendored
+// `android-activity`, and this module drains the queued commit/composition/delete events once per
+// frame into the egui events the focused `TextEdit` understands. The upstream ArtCraft crates are
+// never modified.
+//
+// ARTCRAFT_ANDROID_IME_BRIDGE_V1
+pub mod ime {
+    use android_activity::AndroidApp;
+    use jni::{
+        JavaVM, jni_sig, jni_str,
+        objects::{JObject, JString},
+    };
+    use std::sync::Arc;
 
-use log::info;
-use serde_json::json;
-use wordcraft_engine::Session;
+    /// Emitted at startup so a device log (and the packaged `.so` strings) can confirm this shell —
+    /// including the soft-keyboard bridge — is the one running.
+    pub const IME_MARKER: &str = "ARTCRAFT_ANDROID_IME_BRIDGE_V1";
 
-/// Android Window Insets in physical/logical pixels.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct AndroidInsets {
-    pub status_bar: f32,
-    pub nav_bar: f32,
-    pub ime_height: f32,
-    pub screen_width: f32,
-    pub screen_height: f32,
-}
-
-impl AndroidInsets {
-    /// Computes the usable vertical area for the document canvas above the keyboard.
-    pub fn visible_height(&self) -> f32 {
-        (self.screen_height - self.status_bar - self.nav_bar - self.ime_height).max(100.0)
+    pub struct ImeBridge {
+        app: AndroidApp,
+        vm: Arc<JavaVM>,
+        /// Set once the Activity reports it has no `imePoll` (an Activity that never adopted the IME
+        /// host view), so the per-frame poll stops paying for a call that can only fail.
+        unsupported: bool,
     }
 
-    /// Calculates required scroll adjustment to bring the caret into view.
-    /// `caret_screen_y` is the caret's current vertical coordinate in screen space.
-    pub fn ensure_caret_visible(&self, caret_screen_y: f32, caret_height: f32, current_scroll_y: f32) -> Option<f32> {
-        if self.screen_height <= 0.0 {
-            return None;
+    impl ImeBridge {
+        pub fn new(app: &AndroidApp) -> Self {
+            // SAFETY: AndroidApp owns the live VM pointer for the lifetime of the activity.
+            let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr() as *mut _) };
+            Self {
+                app: app.clone(),
+                vm: Arc::new(vm),
+                unsupported: false,
+            }
         }
-        let visible_top = self.status_bar;
-        let visible_bottom = self.screen_height - self.nav_bar - self.ime_height;
-        let margin = 32.0; // Comfort margin in points/pixels
 
-        if caret_screen_y - margin < visible_top {
-            // Caret is hidden above the top visible boundary: scroll down
-            let diff = visible_top - (caret_screen_y - margin);
-            Some((current_scroll_y - diff).max(0.0))
-        } else if caret_screen_y + caret_height + margin > visible_bottom {
-            // Caret is occluded below by on-screen keyboard: scroll up
-            let diff = (caret_screen_y + caret_height + margin) - visible_bottom;
-            Some(current_scroll_y + diff)
-        } else {
-            None
+        /// Translate every keyboard event the Activity has queued since the last frame into the egui
+        /// IME events the focused `TextEdit` understands. Call once per frame from `raw_input_hook`.
+        pub fn poll(&mut self, raw: &mut egui::RawInput) {
+            if self.unsupported {
+                return;
+            }
+            loop {
+                match self.next_event() {
+                    Ok(Some(event)) => {
+                        if let Some(event) = translate(&event) {
+                            raw.events.push(event);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        log::warn!("Android soft-keyboard bridge unavailable: {error}");
+                        self.unsupported = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        /// Hide the soft keyboard by calling the Activity's `imeHide`. Used when focus is
+        /// surrendered during scroll/draw so the keyboard doesn't persist.
+        pub fn hide_ime(&self) -> Result<(), String> {
+            self.vm
+                .attach_current_thread(|env| -> jni::errors::Result<()> {
+                    let activity_raw = self.app.activity_as_ptr() as jni::sys::jobject;
+                    let activity = unsafe { env.as_cast_raw::<JObject>(&activity_raw)? };
+                    match env.call_method(
+                        &*activity,
+                        jni_str!("imeHide"),
+                        jni_sig!("()V"),
+                        &[],
+                    ) {
+                        Ok(_) => Ok(()),
+                        Err(error) => {
+                            env.exception_clear();
+                            Err(error)
+                        }
+                    }
+                })
+                .map_err(|error| error.to_string())
+        }
+
+        /// Query current soft keyboard height in physical pixels.
+        pub fn ime_height(&self) -> u32 {
+            self.vm
+                .attach_current_thread(|env| -> jni::errors::Result<u32> {
+                    let activity_raw = self.app.activity_as_ptr() as jni::sys::jobject;
+                    let activity = unsafe { env.as_cast_raw::<JObject>(&activity_raw)? };
+                    match env.call_method(
+                        &*activity,
+                        jni_str!("imeGetHeight"),
+                        jni_sig!("()I"),
+                        &[],
+                    ) {
+                        Ok(val) => Ok(val.i().unwrap_or(0).max(0) as u32),
+                        Err(error) => {
+                            env.exception_clear();
+                            Err(error)
+                        }
+                    }
+                })
+                .unwrap_or(0)
+        }
+
+        /// Tell the Activity that the user worked on the document again.
+        ///
+        /// Android takes the back key as "hide the keyboard" and the app hears nothing of it, so
+        /// the app keeps believing the keyboard is up while it is not — and the next edit (a tap,
+        /// a caret moved by key) would go unseen by the keyboard. The Activity watches the
+        /// keyboard's own insets and knows when it was dismissed; this call tells it that the
+        /// document is being worked on again, so it can bring the keyboard back.
+        ///
+        /// Only edits count: a pointer press, or a key that is not the back key (which the app
+        /// receives as Escape, and which must not count as an edit — it is what dismissed the
+        /// keyboard in the first place).
+        pub fn interaction(&mut self, raw: &egui::RawInput) {
+            let edited = raw.events.iter().any(|event| match event {
+                egui::Event::PointerButton { .. } => true,
+                egui::Event::Key { key, .. } => *key != egui::Key::Escape,
+                _ => false,
+            });
+            if !edited {
+                return;
+            }
+            if let Err(error) = self.request_interaction() {
+                log::warn!("Android soft-keyboard bridge cannot report an edit: {error}");
+            }
+        }
+
+        /// Ask the Activity to bring the keyboard back after the user dismissed it.
+        fn request_interaction(&self) -> Result<(), String> {
+            self.vm
+                .attach_current_thread(|env| -> jni::errors::Result<()> {
+                    let activity_raw = self.app.activity_as_ptr() as jni::sys::jobject;
+                    // SAFETY: AndroidApp retains this global Activity reference; as_cast_raw borrows
+                    // it without taking ownership or attempting to delete the reference.
+                    let activity = unsafe { env.as_cast_raw::<JObject>(&activity_raw)? };
+                    match env.call_method(
+                        &*activity,
+                        jni_str!("imeInteraction"),
+                        jni_sig!("()V"),
+                        &[],
+                    ) {
+                        Ok(_) => Ok(()),
+                        Err(error) => {
+                            env.exception_clear();
+                            Err(error)
+                        }
+                    }
+                })
+                .map_err(|error| error.to_string())
+        }
+
+        fn next_event(&self) -> Result<Option<String>, String> {
+            self.vm
+                .attach_current_thread(|env| -> jni::errors::Result<Option<String>> {
+                    let activity_raw = self.app.activity_as_ptr() as jni::sys::jobject;
+                    // SAFETY: AndroidApp retains this global Activity reference; as_cast_raw borrows
+                    // it without taking ownership or attempting to delete the reference.
+                    let activity = unsafe { env.as_cast_raw::<JObject>(&activity_raw)? };
+                    // An Activity that never adopted the IME host has no `imePoll`; invoking it raises
+                    // a pending `NoSuchMethodError`. jni deliberately leaves that exception for the
+                    // caller to handle, and this thread is shared with the SAF bridge, so clear it
+                    // before reporting the missing method (otherwise the next unrelated JNI call sees
+                    // a stale pending exception).
+                    let value = match env.call_method(
+                        &*activity,
+                        jni_str!("imePoll"),
+                        jni_sig!("()Ljava/lang/String;"),
+                        &[],
+                    ) {
+                        Ok(value) => value.l()?,
+                        Err(error) => {
+                            env.exception_clear();
+                            return Err(error);
+                        }
+                    };
+                    if value.is_null() {
+                        return Ok(None);
+                    }
+                    let value = JString::cast_local(env, value)?;
+                    let value: String = value.try_to_string(env)?;
+                    Ok(Some(value))
+                })
+                .map_err(|error| error.to_string())
         }
     }
-}
 
-/// Dispatches an IME text commit event into WordCraft's engine.
-/// Cleans up any prior in-flight composition and commits the text.
-pub fn commit_text(session: &mut Session, text: &str, composing_chars: &mut usize) -> Result<(), String> {
-    info!("IME commit text: '{text}' (replacing {composing_chars} composing chars)");
-    if *composing_chars > 0 {
-        delete_surrounding_text(session, *composing_chars, 0)?;
-        *composing_chars = 0;
-    }
-    session
-        .run("text.insert", &json!({ "text": text }))
-        .map_err(|e| format!("Failed to commit IME text: {e:?}"))?;
-    Ok(())
-}
-
-/// Updates in-flight composing text (preview before commit during swipe-typing or Pinyin).
-/// Joins previous undo steps so intermediate keystrokes do not pollute the undo stack.
-pub fn set_composing_text(session: &mut Session, text: &str, composing_chars: &mut usize) -> Result<(), String> {
-    info!("IME set composing text: '{text}' (current composing={composing_chars})");
-    if *composing_chars > 0 {
-        session.join_next_undo();
-        delete_surrounding_text(session, *composing_chars, 0)?;
-    }
-    if !text.is_empty() {
-        session.join_next_undo();
-        session
-            .run("text.insert", &json!({ "text": text }))
-            .map_err(|e| format!("Failed to set composing text: {e:?}"))?;
-    }
-    *composing_chars = text.chars().count();
-    Ok(())
-}
-
-/// Finalizes the current composition without changing text.
-pub fn finish_composing_text(composing_chars: &mut usize) {
-    info!("IME finish composing text (cleared {composing_chars} tracking)");
-    *composing_chars = 0;
-}
-
-/// Dispatches an IME backspace / delete surrounding text event.
-pub fn delete_surrounding_text(session: &mut Session, before: usize, after: usize) -> Result<(), String> {
-    info!("IME delete surrounding text before={before}, after={after}");
-    for _ in 0..before {
-        session
-            .run("text.backspace", &json!({}))
-            .map_err(|e| format!("Failed to backspace: {e:?}"))?;
-    }
-    for _ in 0..after {
-        session
-            .run("text.delete", &json!({}))
-            .map_err(|e| format!("Failed to forward delete: {e:?}"))?;
-    }
-    Ok(())
-}
-
-/// Extracts up to `n` characters immediately preceding the caret for IME autocompletion and prediction.
-pub fn text_before_cursor(session: &Session, n: usize) -> String {
-    let focus = &session.sel.focus;
-    if let Some(para) = session.doc.para_at(focus) {
-        let off = focus.off.min(para.text.len());
-        let before_bytes = &para.text[..off];
-        before_bytes.chars().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
-    } else {
-        String::new()
-    }
-}
-
-/// Extracts up to `n` characters immediately following the caret for IME context.
-pub fn text_after_cursor(session: &Session, n: usize) -> String {
-    let focus = &session.sel.focus;
-    if let Some(para) = session.doc.para_at(focus) {
-        let off = focus.off.min(para.text.len());
-        let after_bytes = &para.text[off..];
-        after_bytes.chars().take(n).collect()
-    } else {
-        String::new()
-    }
-}
-
-/// Returns the plain text of the active selection (for clipboard and IME replacement).
-pub fn selected_text(session: &Session) -> String {
-    session.selected_text()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_android_insets_visible_height() {
-        let insets = AndroidInsets {
-            status_bar: 48.0,
-            nav_bar: 48.0,
-            ime_height: 300.0,
-            screen_width: 1080.0,
-            screen_height: 1920.0,
-        };
-        // 1920 - 48 - 48 - 300 = 1524
-        assert_eq!(insets.visible_height(), 1524.0);
-    }
-
-    #[test]
-    fn test_ensure_caret_visible_auto_scroll() {
-        let insets = AndroidInsets {
-            status_bar: 50.0,
-            nav_bar: 50.0,
-            ime_height: 500.0,
-            screen_width: 1080.0,
-            screen_height: 1920.0,
-        };
-        // Visible area: top = 50.0, bottom = 1920 - 50 - 500 = 1370.0
-        let current_scroll = 100.0;
-
-        // Caret comfortably visible at y = 600.0
-        assert_eq!(insets.ensure_caret_visible(600.0, 20.0, current_scroll), None);
-
-        // Caret occluded below keyboard at y = 1400.0 (past bottom 1370.0)
-        // Required scroll up: diff = (1400 + 20 + 32) - 1370 = 82.0 -> target_scroll = 100 + 82 = 182.0
-        let scroll_up = insets.ensure_caret_visible(1400.0, 20.0, current_scroll);
-        assert!(scroll_up.is_some());
-        assert_eq!(scroll_up.unwrap(), 182.0);
-
-        // Caret hidden above status bar at y = 20.0
-        // Required scroll down: diff = 50 - (20 - 32) = 62.0 -> target_scroll = 100 - 62 = 38.0
-        let scroll_down = insets.ensure_caret_visible(20.0, 20.0, current_scroll);
-        assert!(scroll_down.is_some());
-        assert_eq!(scroll_down.unwrap(), 38.0);
-    }
-
-    #[test]
-    fn test_ime_text_before_and_after_cursor() {
-        let region = wordcraft_geom::Region::default();
-        let doc = wordcraft_engine::blank_document(&region);
-        let mut session = Session::new(doc);
-
-        let _ = session.run("text.insert", &json!({ "text": "Hello World" }));
-
-        // Caret is at end of "Hello World"
-        assert_eq!(text_before_cursor(&session, 5), "World");
-        assert_eq!(text_before_cursor(&session, 11), "Hello World");
-        assert_eq!(text_after_cursor(&session, 5), "");
-
-        // Move caret back 5 characters (between "Hello " and "World")
-        for _ in 0..5 {
-            let _ = session.run("caret.left", &json!({}));
+    /// A synthetic Enter press. Both the IME's action key (`a`) and its Enter/newline key (`c` with a
+    /// bare newline) become this, so egui decides what Enter means for the focused field.
+    fn enter_key() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
         }
-        assert_eq!(text_before_cursor(&session, 6), "Hello ");
-        assert_eq!(text_after_cursor(&session, 5), "World");
     }
 
-    #[test]
-    fn test_composing_text_lifecycle() {
-        let region = wordcraft_geom::Region::default();
-        let doc = wordcraft_engine::blank_document(&region);
-        let mut session = Session::new(doc);
-        let mut composing_chars = 0;
-
-        // Start composing "wor"
-        set_composing_text(&mut session, "wor", &mut composing_chars).unwrap();
-        assert_eq!(composing_chars, 3);
-        assert_eq!(text_before_cursor(&session, 3), "wor");
-
-        // Update composing text to "world"
-        set_composing_text(&mut session, "world", &mut composing_chars).unwrap();
-        assert_eq!(composing_chars, 5);
-        assert_eq!(text_before_cursor(&session, 5), "world");
-
-        // Commit "world "
-        commit_text(&mut session, "world ", &mut composing_chars).unwrap();
-        assert_eq!(composing_chars, 0);
-        assert_eq!(text_before_cursor(&session, 6), "world ");
+    /// Decode one queued event. The first character tags it and the rest is the payload:
+    /// `c` commit, `p` pre-edit, `f` finish composing, `d` delete `before,after`, `a` editor action.
+    fn translate(event: &str) -> Option<egui::Event> {
+        let mut chars = event.chars();
+        let tag = chars.next()?;
+        let payload = chars.as_str();
+        match tag {
+            'c' if !payload.is_empty() => {
+                // The Enter/newline key arrives as a bare newline. egui deliberately ignores
+                // `Commit("\n")` (newlines are handled by `Key::Enter`), so translate it: a multiline
+                // field gets a newline, a single-line field confirms and drops focus.
+                if payload == "\n" || payload == "\r" || payload == "\r\n" {
+                    return Some(enter_key());
+                }
+                Some(egui::Event::Ime(egui::ImeEvent::Commit(payload.to_owned())))
+            }
+            'p' => Some(egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: payload.to_owned(),
+                active_range_chars: None,
+            })),
+            'f' => Some(egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: String::new(),
+                active_range_chars: None,
+            })),
+            'd' => {
+                let (before, after) = payload.split_once(',')?;
+                let before_chars = before.trim().parse().ok()?;
+                let after_chars = after.trim().parse().ok()?;
+                Some(egui::Event::Ime(egui::ImeEvent::DeleteSurrounding {
+                    before_chars,
+                    after_chars,
+                }))
+            }
+            'a' => {
+                let action: i32 = payload.trim().parse().ok()?;
+                // IME_ACTION_NONE (0) carries no meaning; any real action (Done/Go/Search/Send)
+                // confirms the field.
+                if action == 0 {
+                    return None;
+                }
+                Some(enter_key())
+            }
+            _ => None,
+        }
     }
 }

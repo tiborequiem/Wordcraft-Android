@@ -35,6 +35,38 @@ const EDGE_MAX_DT: f32 = 0.1;
 /// are rendered again when they come back.
 const TEXTURE_KEEP_SCREENS: f32 = 3.0;
 
+/// Touchscreen gesture state machine mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TouchMode {
+    Idle,
+    /// Finger is touching the screen, waiting to distinguish tap vs long-press vs swipe.
+    Pending {
+        start_time: f64,
+        start_pos: Pos2,
+        last_pos: Pos2,
+    },
+    /// Finger moved > 8dp: swiping / scrolling the viewport.
+    Scrolling {
+        last_pos: Pos2,
+        velocity: egui::Vec2,
+    },
+    /// Dragging the selection start teardrop handle.
+    DraggingStartHandle {
+        last_pos: Pos2,
+    },
+    /// Dragging the selection end teardrop handle.
+    DraggingEndHandle {
+        last_pos: Pos2,
+    },
+}
+
+/// Kinetic fling momentum after finger release.
+#[derive(Clone, Copy, Debug)]
+pub struct TouchFling {
+    pub velocity: egui::Vec2,
+    pub last_time: f64,
+}
+
 pub struct CanvasState {
     textures: HashMap<usize, (u64, TextureHandle)>,
     /// Visible full-resolution tiles of pages too tall for one GPU texture.
@@ -195,6 +227,20 @@ pub struct CanvasState {
     pub(crate) tab_drag: Option<crate::ruler_tabs::TabDrag>,
     /// Whether the I-beam over the page is drawn rather than the system's (`ibeam`).
     pub(crate) drawn_ibeam: bool,
+    /// Touch gesture state machine mode (Android & touchscreen).
+    pub touch_mode: TouchMode,
+    /// Kinetic momentum fling deceleration after finger lift.
+    pub touch_fling: Option<TouchFling>,
+    /// Time and position of last tap for double-tap detection.
+    pub last_tap: Option<(f64, Pos2)>,
+    /// Screen hit targets for teardrop selection handles.
+    pub selection_handles: Option<(Rect, Rect)>,
+    /// Soft-keyboard inset in points to keep caret in view.
+    pub keyboard_inset: f32,
+    /// Explicit user tap focus (Android soft-keyboard control).
+    pub user_focused: bool,
+    /// Surrendered focus for the current frame.
+    pub surrendered_focus: bool,
 }
 
 impl CanvasState {
@@ -305,6 +351,13 @@ impl Default for CanvasState {
             tab_kind: Default::default(),
             tab_drag: None,
             drawn_ibeam: crate::ibeam::DRAWN,
+            touch_mode: TouchMode::Idle,
+            touch_fling: None,
+            last_tap: None,
+            selection_handles: None,
+            keyboard_inset: 0.0,
+            user_focused: false,
+            surrendered_focus: false,
         }
     }
 }
@@ -981,6 +1034,53 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         app.canvas.alt_code.clear();
     }
     crate::ink::replay_tick(app, ui.ctx());
+    // Fling momentum coasting
+    if let Some(mut fling) = app.canvas.touch_fling {
+        let now = ui.input(|i| i.time);
+        let dt = ((now - fling.last_time) as f32).clamp(0.001, 0.1);
+        let decay = (0.92_f32).powf(dt * 60.0);
+        app.canvas.scroll_offset = clamped_scroll(app.canvas.scroll_offset, fling.velocity * dt, app.canvas.scroll_max);
+        fling.velocity *= decay;
+        fling.last_time = now;
+        if fling.velocity.length() < 15.0 {
+            app.canvas.touch_fling = None;
+        } else {
+            app.canvas.touch_fling = Some(fling);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    // Two-finger pinch zoom & pan
+    if let Some(multi) = ui.input(|i| i.multi_touch()) {
+        if multi.num_touches >= 2 {
+            app.canvas.touch_mode = TouchMode::Idle;
+            app.canvas.touch_fling = None;
+            app.canvas.dragging = false;
+
+            if multi.translation_delta != egui::Vec2::ZERO {
+                app.canvas.scroll_offset = clamped_scroll(
+                    app.canvas.scroll_offset,
+                    multi.translation_delta,
+                    app.canvas.scroll_max,
+                );
+            }
+
+            if (multi.zoom_delta - 1.0).abs() > 0.001 {
+                let old_zoom = app.session.view.zoom;
+                let new_zoom = (old_zoom * multi.zoom_delta).clamp(0.2, 5.0);
+                if (new_zoom - old_zoom).abs() > 0.001 {
+                    if let Some(vp) = app.canvas.viewport {
+                        let focal_in_vp = multi.center_pos - vp.min;
+                        let factor = new_zoom / old_zoom;
+                        let new_offset = (app.canvas.scroll_offset + focal_in_vp) * factor - focal_in_vp;
+                        app.canvas.scroll_offset = new_offset.clamp(egui::Vec2::ZERO, app.canvas.scroll_max);
+                    }
+                    app.session.view.zoom = new_zoom;
+                }
+            }
+            ui.ctx().request_repaint();
+        }
+    }
     let layout = app.session.layout();
     if let Some(anchor) = reflow_anchor
         && let Some(page) = reading_anchor_page(&layout, &anchor)
@@ -1107,6 +1207,20 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             vec2((c.width * geo.scale).max(2.0), c.height * geo.scale),
         );
         scroll_target = Some(r.expand2(vec2(40.0, 60.0)));
+    }
+    // Keep caret above soft keyboard inset if active
+    if app.canvas.keyboard_inset > 0.0
+        && let Some(c) = caret
+        && let Some(pr) = geo.rects.get(c.page)
+    {
+        let caret_bot = pr.min.y + (c.top + c.height) * geo.scale;
+        let vis_bottom = app.canvas.scroll_offset.y + area.height() - app.canvas.keyboard_inset;
+        if caret_bot > vis_bottom - 20.0 {
+            let needed_scroll = caret_bot - (vis_bottom - 40.0);
+            app.canvas.scroll_offset.y = (app.canvas.scroll_offset.y + needed_scroll).min(app.canvas.scroll_max.y);
+            app.canvas.scroll_request = Some(app.canvas.scroll_offset);
+            ui.ctx().request_repaint();
+        }
     }
     app.canvas.scroll_to_caret = false;
     let mut origin = area.min;
@@ -1475,6 +1589,47 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 screen_rects.push(sr);
             }
         }
+        // Teardrop selection handles for touchscreens
+        if !app.session.sel.is_collapsed() {
+            let (start_pos, end_pos) = app.session.sel.ordered();
+            let start_c = layout.caret_on(&start_pos, app.session.page_hint);
+            let end_c = layout.caret_on(&end_pos, app.session.page_hint);
+            let handle_color = Color32::from_rgb(0x18, 0x5A, 0xBD);
+            let bulb_r = 8.0;
+            let touch_r = 24.0;
+            let mut start_touch = None;
+            let mut end_touch = None;
+
+            if let Some(c) = start_c && let Some(pr) = rects.get(c.page) {
+                let s = layout.pages.get(c.page).map_or(geo.scale, |p| page_screen_scale(*pr, p, geo.scale));
+                let x = pr.min.x + c.x * s;
+                let y_bot = pr.min.y + (c.top + c.height) * s;
+                let bulb = pos2(x - bulb_r * 0.5, y_bot + bulb_r + 2.0);
+                painter.line_segment([pos2(x, y_bot), bulb], Stroke::new(2.5, handle_color));
+                painter.circle_filled(bulb, bulb_r, handle_color);
+                painter.circle_filled(bulb, 2.5, Color32::WHITE);
+                start_touch = Some(Rect::from_center_size(bulb, vec2(touch_r * 2.0, touch_r * 2.0)));
+            }
+
+            if let Some(c) = end_c && let Some(pr) = rects.get(c.page) {
+                let s = layout.pages.get(c.page).map_or(geo.scale, |p| page_screen_scale(*pr, p, geo.scale));
+                let x = pr.min.x + c.x * s;
+                let y_bot = pr.min.y + (c.top + c.height) * s;
+                let bulb = pos2(x + bulb_r * 0.5, y_bot + bulb_r + 2.0);
+                painter.line_segment([pos2(x, y_bot), bulb], Stroke::new(2.5, handle_color));
+                painter.circle_filled(bulb, bulb_r, handle_color);
+                painter.circle_filled(bulb, 2.5, Color32::WHITE);
+                end_touch = Some(Rect::from_center_size(bulb, vec2(touch_r * 2.0, touch_r * 2.0)));
+            }
+
+            if let (Some(sr), Some(er)) = (start_touch, end_touch) {
+                app.canvas.selection_handles = Some((sr, er));
+            } else {
+                app.canvas.selection_handles = None;
+            }
+        } else {
+            app.canvas.selection_handles = None;
+        }
         // Anchor only to visible selection geometry. A selection can span pages, and its
         // document-first line may be scrolled offscreen; using it would pin the toolbar to an
         // old screen position unrelated to the visible selection.
@@ -1679,9 +1834,14 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let keyboard_click = ui.memory(|m| m.has_focus(resp.id)) && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
     let pointer_click = resp.clicked_by(egui::PointerButton::Primary);
     let accesskit_click = resp.clicked() && !pointer_click && !keyboard_click;
-    let focus_click = pointer_click || accesskit_click || resp.drag_started();
-    if focus_click || (app.canvas.want_focus && !resp.has_focus()) {
+    let is_scrolling = matches!(app.canvas.touch_mode, TouchMode::Scrolling { .. });
+    let focus_click = (pointer_click || accesskit_click || resp.drag_started()) && !is_scrolling;
+    let want_focus = if cfg!(target_os = "android") { false } else { app.canvas.want_focus };
+    if focus_click || (want_focus && !resp.has_focus()) {
         resp.request_focus();
+    }
+    if is_scrolling {
+        resp.surrender_focus();
     }
     if focus_click || app.canvas.want_focus {
         app.canvas.want_focus = false;
@@ -1708,7 +1868,14 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     } else
     // Draw Table / Eraser own the mouse while on (no caret moves); else the usual editing.
     if !middle_gesture && !crate::table_pen::pointer(app, ui, &resp, &rects, &layout, geo.scale) {
-        mouse(app, ui, &resp, &rects, &layout, geo.scale);
+        let is_touch = cfg!(target_os = "android")
+            || ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Touch { .. })))
+            || app.canvas.touch_mode != TouchMode::Idle;
+        if is_touch {
+            touch_pointer(app, ui, &resp, &rects, &layout, geo.scale);
+        } else {
+            mouse(app, ui, &resp, &rects, &layout, geo.scale);
+        }
     }
     // A click on a check box ticks it; on a list's button opens the list.
     if !middle_gesture {
@@ -2425,6 +2592,205 @@ fn edge_scroll(p: f32, lo: f32, hi: f32, dt: f32) -> f32 {
 /// scrollable range, so a document shorter than the viewport never moves.
 fn clamped_scroll(before: egui::Vec2, delta: egui::Vec2, max: egui::Vec2) -> egui::Vec2 {
     (before - delta).clamp(egui::Vec2::ZERO, max)
+}
+
+fn touch_pointer(
+    app: &mut WordApp,
+    ui: &Ui,
+    resp: &egui::Response,
+    rects: &[Rect],
+    layout: &DocLayout,
+    scale: f32,
+) {
+    // A pen or the eraser (Draw tab) owns the pointer.
+    if crate::ink::pointer(app, ui, resp, rects, layout, scale) {
+        return;
+    }
+    let pointer = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
+    let dragging = app.canvas.obj_drag.is_some() || app.canvas.crop_drag.is_some();
+    let object_pointer = pointer.or_else(|| dragging.then(|| ui.input(|i| i.pointer.latest_pos())).flatten());
+    if let Some(at) = object_pointer && crate::objects::pointer(app, ui, resp, rects, layout, scale, at) {
+        return;
+    }
+    if crate::table_resize::pointer(app, ui, resp, rects, layout, scale) {
+        return;
+    }
+    if crate::table_mouse::pointer(app, ui, resp, rects, layout, scale) {
+        return;
+    }
+
+    let now = ui.input(|i| i.time);
+    let dt = (ui.input(|i| i.stable_dt) as f32).clamp(0.001, 0.1);
+    let is_down = ui.input(|i| i.pointer.primary_down());
+    let is_pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.contains_pointer();
+    let is_released = ui.input(|i| i.pointer.primary_released());
+
+    if is_pressed {
+        app.canvas.touch_fling = None;
+    }
+
+    match app.canvas.touch_mode {
+        TouchMode::Idle => {
+            if is_pressed && let Some(p) = pointer {
+                if let Some((start_rect, end_rect)) = app.canvas.selection_handles {
+                    if start_rect.contains(p) {
+                        app.canvas.touch_mode = TouchMode::DraggingStartHandle { last_pos: p };
+                        app.canvas.dragging = false;
+                        return;
+                    } else if end_rect.contains(p) {
+                        app.canvas.touch_mode = TouchMode::DraggingEndHandle { last_pos: p };
+                        app.canvas.dragging = false;
+                        return;
+                    }
+                }
+                app.canvas.touch_mode = TouchMode::Pending {
+                    start_time: now,
+                    start_pos: p,
+                    last_pos: p,
+                };
+                app.canvas.dragging = false;
+            }
+        }
+        TouchMode::Pending { start_time, start_pos, last_pos } => {
+            if is_down && let Some(p) = pointer {
+                let dist = p.distance(start_pos);
+                if dist > 8.0 {
+                    // Finger moved > 8dp: initiate smooth canvas pan/scroll
+                    app.canvas.dragging = false;
+                    app.request_ime_hide = true;
+                    let delta = p - last_pos;
+                    let initial_velocity = delta / dt;
+                    app.canvas.touch_mode = TouchMode::Scrolling {
+                        last_pos: p,
+                        velocity: initial_velocity,
+                    };
+                    app.canvas.scroll_offset = clamped_scroll(app.canvas.scroll_offset, delta, app.canvas.scroll_max);
+                    ui.ctx().request_repaint();
+                } else if now - start_time >= 0.400 {
+                    // Long-press >= 400ms: select word
+                    if let Some((page, x, y)) = page_at(rects, layout, scale, start_pos) {
+                        let story = app.session.sel.focus.story;
+                        if let Some(pos) = layout.hit(page, x, y, story) {
+                            let pj = serde_json::to_value(&pos).unwrap_or_default();
+                            let _ = app.run("caret.set", json!({"pos": pj}));
+                            let _ = app.run("select.word", json!({}));
+                            app.session.page_hint = page;
+                            app.canvas.caret_visible_since = crate::now_ms();
+                            resp.request_focus();
+                            app.canvas.user_focused = true;
+                        }
+                    }
+                    app.canvas.touch_mode = TouchMode::Idle;
+                    ui.ctx().request_repaint();
+                } else {
+                    app.canvas.touch_mode = TouchMode::Pending {
+                        start_time,
+                        start_pos,
+                        last_pos: p,
+                    };
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
+                }
+            } else if is_released || !is_down {
+                let tap_pos = pointer.unwrap_or(last_pos);
+                let double_tap = if let Some((last_time, last_p)) = app.canvas.last_tap {
+                    now - last_time < 0.35 && last_p.distance(tap_pos) < 25.0
+                } else {
+                    false
+                };
+
+                if double_tap {
+                    if let Some((page, x, y)) = page_at(rects, layout, scale, tap_pos) {
+                        let story = app.session.sel.focus.story;
+                        if let Some(pos) = layout.hit(page, x, y, story) {
+                            let pj = serde_json::to_value(&pos).unwrap_or_default();
+                            let _ = app.run("caret.set", json!({"pos": pj}));
+                            let _ = app.run("select.word", json!({}));
+                            app.session.page_hint = page;
+                            app.canvas.caret_visible_since = crate::now_ms();
+                            resp.request_focus();
+                            app.canvas.user_focused = true;
+                        }
+                    }
+                    app.canvas.last_tap = None;
+                } else {
+                    if let Some((page, x, y)) = page_at(rects, layout, scale, tap_pos) {
+                        let story = app.session.sel.focus.story;
+                        if let Some(pos) = layout.hit(page, x, y, story) {
+                            let pj = serde_json::to_value(&pos).unwrap_or_default();
+                            let _ = app.run("caret.set", json!({"pos": pj}));
+                            app.session.page_hint = page;
+                            app.canvas.caret_visible_since = crate::now_ms();
+                            resp.request_focus();
+                            app.canvas.user_focused = true;
+                        }
+                    }
+                    app.canvas.last_tap = Some((now, tap_pos));
+                }
+                app.canvas.touch_mode = TouchMode::Idle;
+                app.canvas.dragging = false;
+                ui.ctx().request_repaint();
+            }
+        }
+        TouchMode::Scrolling { last_pos, velocity } => {
+            app.canvas.dragging = false;
+            if is_down && let Some(p) = pointer {
+                let delta = p - last_pos;
+                app.canvas.scroll_offset = clamped_scroll(app.canvas.scroll_offset, delta, app.canvas.scroll_max);
+                let instant_vel = delta / dt;
+                let new_velocity = 0.6 * velocity + 0.4 * instant_vel;
+                app.canvas.touch_mode = TouchMode::Scrolling {
+                    last_pos: p,
+                    velocity: new_velocity,
+                };
+                ui.ctx().request_repaint();
+            } else if is_released || !is_down {
+                if velocity.length() > 50.0 {
+                    app.canvas.touch_fling = Some(TouchFling {
+                        velocity,
+                        last_time: now,
+                    });
+                    ui.ctx().request_repaint();
+                }
+                app.canvas.touch_mode = TouchMode::Idle;
+            }
+        }
+        TouchMode::DraggingStartHandle { last_pos: _ } => {
+            app.canvas.dragging = false;
+            if is_down && let Some(p) = pointer {
+                if let Some((page, x, y)) = page_at(rects, layout, scale, p) {
+                    let story = app.session.sel.focus.story;
+                    if let Some(pos) = layout.hit(page, x, y, story) {
+                        let (_, end) = app.session.sel.ordered();
+                        app.session.sel = wordcraft_engine::Selection { anchor: end, focus: pos };
+                        app.session.page_hint = page;
+                        app.canvas.caret_visible_since = crate::now_ms();
+                        ui.ctx().request_repaint();
+                    }
+                }
+                app.canvas.touch_mode = TouchMode::DraggingStartHandle { last_pos: p };
+            } else if is_released || !is_down {
+                app.canvas.touch_mode = TouchMode::Idle;
+            }
+        }
+        TouchMode::DraggingEndHandle { last_pos: _ } => {
+            app.canvas.dragging = false;
+            if is_down && let Some(p) = pointer {
+                if let Some((page, x, y)) = page_at(rects, layout, scale, p) {
+                    let story = app.session.sel.focus.story;
+                    if let Some(pos) = layout.hit(page, x, y, story) {
+                        let (start, _) = app.session.sel.ordered();
+                        app.session.sel = wordcraft_engine::Selection { anchor: start, focus: pos };
+                        app.session.page_hint = page;
+                        app.canvas.caret_visible_since = crate::now_ms();
+                        ui.ctx().request_repaint();
+                    }
+                }
+                app.canvas.touch_mode = TouchMode::DraggingEndHandle { last_pos: p };
+            } else if is_released || !is_down {
+                app.canvas.touch_mode = TouchMode::Idle;
+            }
+        }
+    }
 }
 
 fn mouse(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[Rect], layout: &DocLayout, scale: f32) {
