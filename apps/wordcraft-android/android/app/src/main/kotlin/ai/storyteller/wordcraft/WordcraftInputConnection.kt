@@ -3,7 +3,6 @@ package ai.storyteller.wordcraft
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
-import android.view.inputmethod.InputConnection
 
 /**
  * Custom InputConnection for WordCraft, bridging native Android keyboard events
@@ -11,27 +10,28 @@ import android.view.inputmethod.InputConnection
  * directly into the Rust engine.
  */
 class WordcraftInputConnection(
-    targetView: View
+    targetView: View,
+    private val bridge: WordcraftBridge
 ) : BaseInputConnection(targetView, true) {
 
     private var batchDepth = 0
 
     override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence {
-        return WordcraftBridge.nativeImeGetTextBeforeCursor(n)
+        return bridge.imeGetTextBeforeCursor(n)
     }
 
     override fun getTextAfterCursor(n: Int, flags: Int): CharSequence {
-        return WordcraftBridge.nativeImeGetTextAfterCursor(n)
+        return bridge.imeGetTextAfterCursor(n)
     }
 
     override fun getSelectedText(flags: Int): CharSequence {
-        return WordcraftBridge.nativeImeGetSelectedText()
+        return bridge.imeGetSelectedText()
     }
 
     override fun beginBatchEdit(): Boolean {
         batchDepth++
         if (batchDepth == 1) {
-            WordcraftBridge.nativeImeBeginBatchEdit()
+            bridge.imeBeginBatchEdit()
         }
         return true
     }
@@ -40,7 +40,7 @@ class WordcraftInputConnection(
         if (batchDepth > 0) {
             batchDepth--
             if (batchDepth == 0) {
-                WordcraftBridge.nativeImeEndBatchEdit()
+                bridge.imeEndBatchEdit()
             }
         }
         return true
@@ -48,26 +48,26 @@ class WordcraftInputConnection(
 
     override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
         if (!text.isNullOrEmpty()) {
-            WordcraftBridge.nativeImeCommitText(text.toString())
+            bridge.imeCommitText(text.toString(), newCursorPosition)
         }
         return true
     }
 
     override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
         if (text != null) {
-            WordcraftBridge.nativeImeSetComposingText(text.toString(), newCursorPosition)
+            bridge.imeSetComposingText(text.toString(), newCursorPosition)
         }
         return true
     }
 
     override fun finishComposingText(): Boolean {
-        WordcraftBridge.nativeImeFinishComposingText()
+        bridge.imeFinishComposingText()
         return true
     }
 
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
         if (beforeLength > 0 || afterLength > 0) {
-            WordcraftBridge.nativeImeDeleteSurroundingText(beforeLength, afterLength)
+            bridge.imeDeleteSurroundingText(beforeLength, afterLength)
         }
         return true
     }
@@ -87,69 +87,69 @@ class WordcraftInputConnection(
                 when (event.keyCode) {
                     KeyEvent.KEYCODE_Z -> {
                         if (isShift) {
-                            WordcraftBridge.dispatchCommand("edit.redo")
+                            bridge.dispatchCommand("edit.redo")
                         } else {
-                            WordcraftBridge.dispatchCommand("edit.undo")
+                            bridge.dispatchCommand("edit.undo")
                         }
                         return true
                     }
                     KeyEvent.KEYCODE_Y -> {
-                        WordcraftBridge.dispatchCommand("edit.redo")
+                        bridge.dispatchCommand("edit.redo")
                         return true
                     }
                     KeyEvent.KEYCODE_B -> {
-                        WordcraftBridge.dispatchCommand("format.bold")
+                        bridge.dispatchCommand("format.bold")
                         return true
                     }
                     KeyEvent.KEYCODE_I -> {
-                        WordcraftBridge.dispatchCommand("format.italic")
+                        bridge.dispatchCommand("format.italic")
                         return true
                     }
                     KeyEvent.KEYCODE_U -> {
-                        WordcraftBridge.dispatchCommand("format.underline")
+                        bridge.dispatchCommand("format.underline")
                         return true
                     }
                     KeyEvent.KEYCODE_A -> {
-                        WordcraftBridge.dispatchCommand("select.all")
+                        bridge.dispatchCommand("select.all")
                         return true
                     }
                     KeyEvent.KEYCODE_C -> {
-                        WordcraftBridge.dispatchCommand("edit.copy")
+                        bridge.dispatchCommand("edit.copy")
                         return true
                     }
                     KeyEvent.KEYCODE_X -> {
-                        WordcraftBridge.dispatchCommand("edit.cut")
+                        bridge.dispatchCommand("edit.cut")
                         return true
                     }
                     KeyEvent.KEYCODE_V -> {
-                        WordcraftBridge.dispatchCommand("edit.paste")
+                        bridge.dispatchCommand("edit.paste")
                         return true
                     }
                     KeyEvent.KEYCODE_DEL -> {
-                        WordcraftBridge.dispatchCommand("text.deleteWordBack")
+                        bridge.dispatchCommand("text.deleteWordBack")
                         return true
                     }
                     KeyEvent.KEYCODE_FORWARD_DEL -> {
-                        WordcraftBridge.dispatchCommand("text.deleteWordForward")
+                        bridge.dispatchCommand("text.deleteWordForward")
                         return true
                     }
                     KeyEvent.KEYCODE_ENTER -> {
-                        WordcraftBridge.dispatchCommand("text.pageBreak")
+                        bridge.dispatchCommand("text.pageBreak")
                         return true
                     }
                     KeyEvent.KEYCODE_DPAD_LEFT -> {
                         if (isShift) {
-                            WordcraftBridge.dispatchCommand("select.wordLeft")
+                            bridge.dispatchCommand("select.wordLeft")
                         } else {
-                            WordcraftBridge.dispatchCommand("caret.wordLeft")
+                            bridge.dispatchCommand("caret.wordLeft")
                         }
                         return true
                     }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> {
                         if (isShift) {
-                            WordcraftBridge.dispatchCommand("select.wordRight")
+                            bridge.dispatchCommand("select.wordRight")
                         } else {
-                            WordcraftBridge.dispatchCommand("caret.wordRight")
+                            bridge.dispatchCommand("caret.wordRight")
                         }
                         return true
                     }
@@ -159,58 +159,58 @@ class WordcraftInputConnection(
             // 2. Standard Key Events
             when (event.keyCode) {
                 KeyEvent.KEYCODE_DEL -> {
-                    WordcraftBridge.nativeImeDeleteSurroundingText(1, 0)
+                    bridge.imeDeleteSurroundingText(1, 0)
                     return true
                 }
                 KeyEvent.KEYCODE_FORWARD_DEL -> {
-                    WordcraftBridge.dispatchCommand("text.delete")
+                    bridge.dispatchCommand("text.delete")
                     return true
                 }
                 KeyEvent.KEYCODE_ENTER -> {
                     if (isShift) {
-                        WordcraftBridge.dispatchCommand("text.lineBreak")
+                        bridge.dispatchCommand("text.lineBreak")
                     } else {
-                        WordcraftBridge.dispatchCommand("text.newParagraph")
+                        bridge.dispatchCommand("text.newParagraph")
                     }
                     return true
                 }
                 KeyEvent.KEYCODE_TAB -> {
                     if (isShift) {
-                        WordcraftBridge.dispatchCommand("text.backTab")
+                        bridge.dispatchCommand("text.backTab")
                     } else {
-                        WordcraftBridge.dispatchCommand("text.tab")
+                        bridge.dispatchCommand("text.tab")
                     }
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_LEFT -> {
                     if (isShift) {
-                        WordcraftBridge.dispatchCommand("select.left")
+                        bridge.dispatchCommand("select.left")
                     } else {
-                        WordcraftBridge.dispatchCommand("caret.left")
+                        bridge.dispatchCommand("caret.left")
                     }
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> {
                     if (isShift) {
-                        WordcraftBridge.dispatchCommand("select.right")
+                        bridge.dispatchCommand("select.right")
                     } else {
-                        WordcraftBridge.dispatchCommand("caret.right")
+                        bridge.dispatchCommand("caret.right")
                     }
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_UP -> {
                     if (isShift) {
-                        WordcraftBridge.dispatchCommand("select.up")
+                        bridge.dispatchCommand("select.up")
                     } else {
-                        WordcraftBridge.dispatchCommand("caret.up")
+                        bridge.dispatchCommand("caret.up")
                     }
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_DOWN -> {
                     if (isShift) {
-                        WordcraftBridge.dispatchCommand("select.down")
+                        bridge.dispatchCommand("select.down")
                     } else {
-                        WordcraftBridge.dispatchCommand("caret.down")
+                        bridge.dispatchCommand("caret.down")
                     }
                     return true
                 }
