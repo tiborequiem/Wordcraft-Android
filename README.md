@@ -5,16 +5,22 @@
 <h1 align="center">WordCraft for Android</h1>
 
 <p align="center">
-  <b>A first-class, touch-optimized native Android port of the pure-Rust WordCraft word processor.</b><br>
-  <i>Built with Rust, WGPU (Vulkan & GLES), JNI, and Jetpack Compose Material 3.</i>
+  <b>The official touch-optimized native Android port of the pure-Rust WordCraft word processor.</b><br>
+  <i>100% authentic upstream white-and-blue WordCraft UI with a dedicated Mobile Touchscreen Gesture State Machine.</i>
+</p>
+
+<p align="center">
+  <a href="https://github.com/tiborequiem/Wordcraft-Android/releases/latest">
+    <img alt="Download APK" src="https://img.shields.io/badge/Download-Latest%20APK%20(v0.10.0)-185ABD?style=for-the-badge&logo=android&logoColor=white">
+  </a>
 </p>
 
 <p align="center">
   <img alt="Platform: Android" src="https://img.shields.io/badge/platform-Android%208.0%2B%20(API%2026%2B)-3DDC84?style=flat-square&logo=android&logoColor=white">
   <img alt="Core: Rust" src="https://img.shields.io/badge/core-Pure%20Rust-2b47b5?style=flat-square&logo=rust&logoColor=white">
-  <img alt="UI: Jetpack Compose" src="https://img.shields.io/badge/UI-Jetpack%20Compose%20(Material%203)-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white">
+  <img alt="UI: Upstream egui" src="https://img.shields.io/badge/UI-Upstream%20egui%20(WordCraft%20White%20%26%20Blue)-185ABD?style=flat-square">
   <img alt="Rendering: WGPU Vulkan/GLES" src="https://img.shields.io/badge/rendering-WGPU%20(Vulkan%20%2F%20GLES)-black?style=flat-square">
-  <img alt="Arch: arm64-v8a / x86_64" src="https://img.shields.io/badge/arch-arm64--v8a%20%C2%B7%20x86__64-orange?style=flat-square">
+  <img alt="Arch: arm64-v8a" src="https://img.shields.io/badge/arch-arm64--v8a-orange?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-2b47b5?style=flat-square">
 </p>
 
@@ -22,36 +28,26 @@
 
 ## 📱 Overview
 
-**WordCraft Android** brings WordCraft's 389+ Microsoft Word-parity engine commands, line breaking, multi-page layout, and document serialization directly to Android devices. 
+**WordCraft Android** brings WordCraft's full desktop word-processing power to Android devices. Unlike standard mobile ports that degrade the interface or suffer from touchscreen input bugs, WordCraft Android delivers:
 
-Rather than a sluggish WebView or an un-ergonomic desktop-to-mobile compile, WordCraft Android implements a **true native hybrid architecture**:
-1. **Rust Core Engine (`wordcraft_engine`)**: Document model, typography, pagination, undo/redo history, and format parsers.
-2. **Native Surface View (`wgpu`)**: Hardware-accelerated Vulkan canvas rendering with OpenGL ES fallback on a native `SurfaceView`.
-3. **Jetpack Compose Material 3 Chrome**: Native mobile UX including Top App Bar, contextual Keyboard Formatting Bar, animated Floating Selection Toolbar, and Modal Bottom Sheets.
-4. **Split JNI Bridge**: High-frequency zero-allocation primitives for 60/120fps touch gestures, pinch-zoom, and soft keyboard typing.
+1. **Authentic Upstream Visual Identity**: Preserves 100% of the original `storytold/wordcraft` white-and-blue `egui` interface—including the full Ribbon toolbar, Styles gallery, dialogs, status bar, and page canvas.
+2. **Dedicated Mobile Touchscreen Gesture State Machine**: Completely eliminates accidental text selection during scrolling. A single finger swipe smoothly pans the document with natural kinetic momentum fling, while text selection is cleanly managed via taps, double-taps, long-presses, and draggable teardrop handles.
+3. **Android Storage Access Framework (SAF)**: Full integration with native Android file pickers (`ACTION_OPEN_DOCUMENT` and `ACTION_CREATE_DOCUMENT`), staging byte streams for `.docx`, `.odt`, `.rtf`, `.md`, and `.txt` documents.
+4. **Soft Keyboard (IME) with Viewport Auto-Scroll**: Tapping places the caret and summons the keyboard, with the viewport automatically scrolling to keep your active typing line comfortably above the soft keyboard.
+5. **Adaptive Launcher Icon**: Custom WordCraft adaptive icon (`ic_launcher` / `ic_launcher_round`) with crisp vector assets for modern Android home screens.
 
 ---
 
-## ✨ Features
+## 👆 Touchscreen Gestures
 
-- **Touch Ergonomics & Momentum Physics**:
-  - Kinetic scrolling with native Android `OverScroller` spline deceleration.
-  - Smooth pinch-to-zoom viewport scaling clamped `0.5x` to `4.0x`.
-  - **Teardrop Selection Handles** with finger-occlusion offset (`y - 36.dp`) tracking the text baseline above the user's thumb.
-  - Seamless handle crossover swapping with haptic feedback.
-  - Floating `Modifier.magnifier` lens during handle dragging.
-  - Floating selection action mode (`Cut`, `Copy`, `Paste`, `Highlight`, `Comment`) that smoothly fades out during scroll/gestures and returns when settled.
-
-- **Soft Keyboard (IME) Integration**:
-  - Custom `WordcraftInputConnection` providing full Gboard autocompletion and predictive swipe typing context (`getTextBeforeCursor`, `getTextAfterCursor`, `getSelectedText`).
-  - Transactional undo coalescing: typing and swipes join previous undo steps so backspaces and continuous writing don't pollute the undo stack.
-  - Dynamic `WindowInsets` caret visibility: the viewport automatically scrolls up so the caret is never hidden behind the soft keyboard.
-
-- **Android Scoped Storage (SAF) & Formats**:
-  - Native document picker (`ACTION_OPEN_DOCUMENT` and `ACTION_CREATE_DOCUMENT`) reading and writing byte streams without raw POSIX path restrictions.
-  - Opens and saves `.docx`, `.odt`, `.rtf`, `.md`, and `.txt`.
-  - Exports tagged and marked-up `.pdf` files.
-  - Native Android Share Sheet via `FileProvider`.
+| Gesture | Action |
+|---|---|
+| **1-Finger Drag / Swipe** | **Scrolls Document Viewport** vertically & horizontally with exponential kinetic fling momentum. *Never accidentally selects text.* |
+| **Ribbon Swipe** | Touch-drag scrolling across the top Ribbon toolbar and Table Styles gallery for narrow mobile screens. |
+| **Single Tap (< 8dp)** | Places text caret at the tapped location and opens the soft keyboard (IME). |
+| **Double-Tap / Long-Press (400ms)** | Selects the word under the finger and reveals draggable **WordCraft Blue Teardrop Selection Handles**. |
+| **Dragging Selection Handles** | Expands or contracts the selection range precisely without scrolling interference. |
+| **Two-Finger Pinch** | Smoothly zooms the page canvas in/out around the pinch focal point. |
 
 ---
 
@@ -59,87 +55,85 @@ Rather than a sluggish WebView or an un-ergonomic desktop-to-mobile compile, Wor
 
 ```mermaid
 flowchart TD
-    subgraph JetpackCompose ["Jetpack Compose Material 3 Shell"]
-        StateFlow["StateFlow<EditorUiState>"]
-        InteractingFlow["StateFlow<Boolean> (isInteracting Toolbar Fade)"]
-        TopBar["Top App Bar (Undo/Redo, Title, Share, Open/Save)"]
-        FormatBar["Contextual Keyboard Formatting Bar"]
-        FloatingBar["Animated Floating Action Mode (Cut, Copy, Paste, Comment)"]
-        Handles["Teardrop Selection Handles (Start & End with Crossover Swap)"]
-        Magnifier["Floating Magnifier Lens (Touch Baseline Focus)"]
-        CanvasHost["WordcraftCanvas (SurfaceView + OverScroller Spline Fling)"]
-        CustomIME["WordcraftInputConnection (Swipe, Autocomplete, Batch Undo)"]
+    subgraph AndroidOS ["Android OS Layer"]
+        GameActivity["WordCraftActivity (GameActivity)"]
+        SAF["Storage Access Framework (ACTION_OPEN / CREATE_DOCUMENT)"]
+        IME["Soft Keyboard & WindowInsets (IME Height Tracking)"]
+        Icon["Adaptive Launcher Icon (ic_launcher)"]
     end
 
-    subgraph JNI_Layer ["Split JNI Bridge (libwordcraft_android.so)"]
-        CmdJNI["Low-Frequency: Command Dispatcher (dispatchCommand)"]
-        HotJNI["High-Frequency Hot Path: Raw Primitives (Touch / Scale / Fling / IME / Handle Drag)"]
-        StatePush["Bi-Directional State Push (Rust -> Kotlin StateFlow)"]
+    subgraph NativeBridge ["Native JNI & Bridge Layer"]
+        SAFBridge["saf_bridge (Java Native Callbacks -> Rust Staging)"]
+        IMEBridge["ime_bridge (WindowInsets Inset Padding -> Viewport)"]
+        WinitHost["winit + wgpu (Vulkan / OpenGL ES Android Surface)"]
     end
 
-    subgraph RustCore ["WordCraft Engine & WGPU Canvas"]
-        SurfaceRenderer["AndroidRenderer (Vulkan / OpenGL ES Fallback)"]
-        Session["Session (Document, Selection, Undo/Redo)"]
-        DocLayout["DocLayout (Pagination, Hit-Testing, Caret Coordinates)"]
-        DocRender["wordcraft-render (vello_cpu Rasterizer)"]
-        TouchMachine["Kinetic Momentum, Pinch Scale & Selection Crossover Engine"]
+    subgraph RustUI ["WordCraft egui Layer (crates/ui-egui)"]
+        RibbonBar["Ribbon Bar (drag-to-scroll enabled)"]
+        TouchMachine["Mobile Touchscreen Gesture State Machine (canvas.rs)"]
+        Handles["Teardrop Selection Handles (WordCraft Blue #185ABD)"]
+        AutoScroll["Viewport Auto-Scroll (Caret > Keyboard Inset)"]
     end
 
-    StatePush -->|Push EditorUiState| StateFlow
-    StateFlow --> TopBar
-    StateFlow --> FormatBar
-    StateFlow --> FloatingBar
-    StateFlow --> Handles
-    InteractingFlow --> FloatingBar
+    subgraph CoreEngine ["WordCraft Core Engine (crates/engine)"]
+        Session["Session (Document Model, Undo/Redo)"]
+        Layout["Layout Engine (Pagination, Hit-Testing)"]
+        Formats["Docx / ODT / RTF / Markdown / PDF Parsers"]
+    end
 
-    TopBar -->|Format / Style / Tables| CmdJNI
-    FormatBar -->|Bold / Italic / Align| CmdJNI
-    FloatingBar -->|Cut / Copy / Paste| CmdJNI
-    CmdJNI -->|Session::run(id, params)| Session
+    GameActivity --> WinitHost
+    SAF --> SAFBridge
+    IME --> IMEBridge
+    WinitHost --> RustUI
+    SAFBridge --> Formats
+    IMEBridge --> AutoScroll
 
-    CanvasHost -->|nativeOnScroll / nativeOnScale / nativeOnFling| HotJNI
-    CanvasHost -->|nativeOnTap / nativeOnDoubleTap / nativeOnLongPress| HotJNI
-    Handles -->|nativeOnDragSelectionHandle| HotJNI
-    CustomIME -->|nativeImeCommit / nativeImeSetComposing| HotJNI
-
-    HotJNI --> TouchMachine
-    HotJNI --> Session
-    Session --> DocLayout
-    DocLayout --> StatePush
-
-    CanvasHost -->|ANativeWindow_fromSurface| SurfaceRenderer
-    DocLayout --> DocRender
-    DocRender --> SurfaceRenderer
+    TouchMachine -->|Scroll / Zoom| AutoScroll
+    TouchMachine -->|Select / Caret| Session
+    RibbonBar -->|Commands| Session
+    Session --> Layout
+    Layout --> TouchMachine
 ```
 
 ---
 
-## 🚀 Building & Running
+## 📥 Download Pre-built APK
 
-### Requirements
-- Android SDK (API 34) & NDK 26+
-- JDK 17+
-- Rust toolchain (`rustup target add aarch64-linux-android x86_64-linux-android`)
-- `cargo-ndk` (`cargo install cargo-ndk`)
+You can download the latest pre-built APK directly from GitHub Releases:
 
-### Option 1: Android Studio (Recommended)
-1. Open the project root in Android Studio:
-   `apps/wordcraft-android/android`
-2. Android Studio will automatically sync the Gradle build and download the NDK/SDK components.
-3. Run on a connected Android device or emulator (`Shift + F10`).
+👉 **[Download Latest APK from Releases](https://github.com/tiborequiem/Wordcraft-Android/releases/latest)**
 
-### Option 2: Command Line
-1. Build the Rust native libraries and APK:
-   ```bash
-   ./apps/wordcraft-android/build_apk.sh --debug
-   ```
-2. The generated APK will be placed in:
-   `apps/wordcraft-android/android/app/build/outputs/apk/debug/app-debug.apk`
+---
+
+## 🛠️ Building from Source
+
+### Prerequisites
+- Android SDK (API 28+) & NDK (26+)
+- JDK 17 (recommended: Eclipse Temurin JDK 17)
+- Rust toolchain with target:
+  ```bash
+  rustup target add aarch64-linux-android
+  cargo install cargo-ndk
+  ```
+
+### One-Command Build Script
+A turnkey automated build script is provided at the repository root:
+
+```bash
+# Set your SDK/NDK paths if not standard
+export ANDROID_HOME=$HOME/Android/Sdk
+export ANDROID_NDK_HOME=$(ls -d $HOME/Android/Sdk/ndk/* | tail -n 1)
+
+# Build the arm64-v8a native shared library and assemble debug APK
+./build_apk.sh
+```
+
+The resulting APK will be placed at `./wordcraft-android-v0.10.0-debug.apk` and inside `apps/wordcraft-android/android/app/build/outputs/apk/debug/`.
 
 ---
 
 ## 📄 License & Attribution
 
 - WordCraft Android is licensed under **MIT OR Apache-2.0**.
-- Built on top of the clean-room, open-source [`storytold/wordcraft`](https://github.com/storytold/wordcraft) engine by the ArtCraft team.
-- No proprietary Microsoft, Adobe, Avid, or Autodesk assets or iconography are used. All icons and UI elements are custom Material 3 / code-drawn.
+- Built on top of the clean-room, open-source [`storytold/wordcraft`](https://github.com/storytold/wordcraft) engine.
+- No proprietary Microsoft, Adobe, Avid, or Autodesk assets or iconography are used. All icons and UI elements are original or open-source.
