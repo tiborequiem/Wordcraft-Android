@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <application android:label="WordCraft" android:theme="@style/Theme.Artcraft" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round">
+    <application android:label="WordCraft" android:theme="@style/Theme.Artcraft" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:enableOnBackInvokedCallback="true">
         <activity android:name=".WordCraftActivity" android:label="WordCraft" android:launchMode="singleTask" android:screenOrientation="sensor" android:configChanges="orientation|keyboard|keyboardHidden|navigation|screenSize|screenLayout|smallestScreenSize|density|layoutDirection|uiMode|fontScale|locale" android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="wordcraft_android" />
             <intent-filter>

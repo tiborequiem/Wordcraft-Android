@@ -1252,6 +1252,9 @@ impl AndroidShell {
                 persist_save(&mut inner, dir);
             }
         }
+        inner.session.view.ruler = false;
+        inner.ui.nav_pane = false;
+        inner.ui.ribbon_collapsed = true;
         let ime = ime_bridge::ime::ImeBridge::new(&app);
         Self { inner, app, ime, modifiers: egui::Modifiers::default(), fullscreen_applied: false, probe: InputProbe::default(), bars_theme: None, back_pending: false, closing: false, close_asked: false, saf_bridge, saf_state, saf_inbox, intent_warmup: 2, persist, persist_last: None }
     }
@@ -1383,17 +1386,94 @@ impl AndroidShell {
     fn map_android_back(&mut self, raw: &mut egui::RawInput) {
         let mut pressed = false;
         for event in &mut raw.events {
-            if let egui::Event::Key { key, pressed: is_pressed, .. } = event
-                && *key == egui::Key::BrowserBack
-            {
-                *key = egui::Key::Escape;
-                pressed |= *is_pressed;
+            if let egui::Event::Key { key, pressed: is_pressed, .. } = event {
+                if *key == egui::Key::BrowserBack {
+                    pressed |= *is_pressed;
+                }
             }
         }
         if pressed {
-            self.back_pending = true;
-            log::info!("Android: back press mapped to Escape");
+            BACK_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+            log::info!("Android: back press detected");
         }
+    }
+
+    fn move_task_to_back(app: &AndroidApp) {
+        let app_clone = app.clone();
+        app.run_on_java_main_thread(Box::new(move || {
+            let jvm = unsafe { JavaVM::from_raw(app_clone.vm_as_ptr() as *mut _) };
+            let _ = jvm.attach_current_thread(|env| -> jni::errors::Result<()> {
+                let activity_raw = app_clone.activity_as_ptr() as jni::sys::jobject;
+                let activity = unsafe { env.as_cast_raw::<JObject>(&activity_raw)? };
+                let _ = env.call_method(&*activity, jni_str!("moveAppToBack"), jni_sig!("()V"), &[]);
+                Ok(())
+            });
+        }));
+    }
+
+    fn handle_back_priority_chain(inner: &mut WordApp, app: &AndroidApp, ctx: &egui::Context) {
+        log::info!("Android: handling back gesture through priority chain");
+        // 1. If any modal dialog, dropdown, file menu, or find-and-replace panel is open: close that dialog/menu first.
+        let mut popup_closed = false;
+        if egui::Popup::is_any_open(ctx) {
+            egui::Popup::close_all(ctx);
+            popup_closed = true;
+        }
+        if popup_closed {
+            ctx.request_repaint();
+            return;
+        }
+        if inner.dialog.is_some() {
+            inner.dialog = None;
+            ctx.request_repaint();
+            return;
+        }
+        if inner.colors.is_some() {
+            inner.colors = None;
+            ctx.request_repaint();
+            return;
+        }
+        if inner.ui.backstage {
+            inner.ui.backstage = false;
+            ctx.request_repaint();
+            return;
+        }
+        if inner.canvas.context_menu_open {
+            inner.canvas.context_menu_open = false;
+            ctx.request_repaint();
+            return;
+        }
+        if inner.ui.nav_pane {
+            inner.ui.nav_pane = false;
+            ctx.request_repaint();
+            return;
+        }
+
+        // 2. If text is currently selected: clear the selection and hide the selection handles.
+        if !inner.session.sel.is_collapsed() {
+            inner.session.sel = wordcraft_engine::Selection::caret(inner.session.sel.focus.clone());
+            inner.canvas.selection_handles = None;
+            ctx.request_repaint();
+            return;
+        }
+
+        // 3. If the Ribbon is expanded (in compact phone mode): collapse the Ribbon drawer.
+        let is_phone = ctx.input(|i| i.viewport_rect().width()) < 600.0;
+        if is_phone && !inner.ui.ribbon_collapsed {
+            inner.ui.ribbon_collapsed = true;
+            ctx.request_repaint();
+            return;
+        }
+
+        // 4. If the document has unsaved changes (is_dirty): show WordCraft's native egui "Save changes before closing?" prompt.
+        if inner.session.dirty {
+            let _ = inner.close_requested();
+            ctx.request_repaint();
+            return;
+        }
+
+        // 5. If at the root state: call moveTaskToBack(true) via JNI so normal Android back navigation works as expected.
+        Self::move_task_to_back(app);
     }
 
     /// The user asked to leave (the Android back button). Let the app have the first word: the
@@ -1401,6 +1481,7 @@ impl AndroidShell {
     /// app. `close_requested` is the desktop's own check — the desktop runs it when its window
     /// closes — so the app opens the same "Do you want to quit without saving unsaved changes?"
     /// prompt it shows on the desktop instead of vanishing with unsaved work.
+    #[allow(dead_code)]
     fn request_close(&mut self) {
         if self.closing {
             return;
@@ -1445,6 +1526,16 @@ impl AndroidShell {
     }
 }
 
+static BACK_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Java_ai_storyteller_wordcraft_WordCraftActivity_nativeOnBackPressed(
+    _env: jni::EnvUnowned,
+    _class: jni::objects::JClass,
+) {
+    BACK_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl Drop for AndroidShell {
     fn drop(&mut self) {
         // The Activity is about to go: stop the watcher before the native thread returns.
@@ -1486,20 +1577,8 @@ impl eframe::App for AndroidShell {
         system_fonts::install_system_fonts(ui.ctx());
         let _ = frame;
         self.inner.ui(ui);
-        if self.back_pending {
-            self.back_pending = false;
-            // A back press was mapped onto Escape. If the app consumed that Escape (a dialog
-            // closed, a panel went back), the button did its job; otherwise back means "leave",
-            // as it does on Android — which the app may still refuse, by asking first.
-            if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-                if self.close_asked {
-                    // The app had its say last time (it opened a prompt, which this press just
-                    // dismissed); don't ask it again straight away.
-                    self.close_asked = false;
-                } else {
-                    self.request_close();
-                }
-            }
+        if BACK_REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            Self::handle_back_priority_chain(&mut self.inner, &self.app, ui.ctx());
         }
     }
 

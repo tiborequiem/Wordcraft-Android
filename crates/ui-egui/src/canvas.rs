@@ -44,8 +44,10 @@ pub enum TouchMode {
         start_time: f64,
         start_pos: Pos2,
         last_pos: Pos2,
+        max_dist: f32,
+        stopped_fling: bool,
     },
-    /// Finger moved > 8dp: swiping / scrolling the viewport.
+    /// Finger moved > 12.0dp: swiping / scrolling the viewport.
     Scrolling {
         last_pos: Pos2,
         velocity: egui::Vec2,
@@ -1092,7 +1094,9 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     // View › Switch Modes: dark paper, inverted document colours.
     let dark_page = app.session.view.dark_mode;
     let dark_paper = wordcraft_render::DARK_PAPER;
+    let is_phone = full.width() < 600.0;
     let show_ruler = app.session.view.ruler
+        && !is_phone
         && app.session.view.mode == wordcraft_layout::ViewMode::Print
         && !app.session.view.read_mode
         && crate::chrome::Screen::of(&app.session.view) == crate::chrome::Screen::Normal;
@@ -1834,9 +1838,23 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let keyboard_click = ui.memory(|m| m.has_focus(resp.id)) && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
     let pointer_click = resp.clicked_by(egui::PointerButton::Primary);
     let accesskit_click = resp.clicked() && !pointer_click && !keyboard_click;
-    let is_scrolling = matches!(app.canvas.touch_mode, TouchMode::Scrolling { .. });
-    let focus_click = (pointer_click || accesskit_click || resp.drag_started()) && !is_scrolling;
-    let want_focus = if cfg!(target_os = "android") { false } else { app.canvas.want_focus };
+    let is_scrolling = matches!(app.canvas.touch_mode, TouchMode::Scrolling { .. }) || app.canvas.touch_fling.is_some();
+    if is_scrolling {
+        resp.surrender_focus();
+        app.canvas.user_focused = false;
+        app.request_ime_hide = true;
+    }
+    let is_android = cfg!(target_os = "android");
+    let focus_click = if is_android {
+        false
+    } else {
+        (pointer_click || accesskit_click || resp.drag_started()) && !is_scrolling
+    };
+    let want_focus = if is_android {
+        app.canvas.user_focused && !is_scrolling
+    } else {
+        app.canvas.want_focus
+    };
     if focus_click || (want_focus && !resp.has_focus()) {
         resp.request_focus();
     }
@@ -1852,7 +1870,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             m.set_focus_lock_filter(resp.id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true })
         });
     }
-    app.canvas.focused = resp.has_focus();
+    app.canvas.focused = resp.has_focus() && (!is_android || app.canvas.user_focused) && !is_scrolling;
     // Screen readers: the document under the canvas, with the caret (#488).
     crate::a11y::expose(app, ui.ctx(), resp.id, &layout, &rects, area);
     // The buttons that start or stop middle-click scrolling don't also click the page.
@@ -2625,9 +2643,11 @@ fn touch_pointer(
     let is_pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.contains_pointer();
     let is_released = ui.input(|i| i.pointer.primary_released());
 
-    if is_pressed {
-        app.canvas.touch_fling = None;
-    }
+    let stopped_fling = if is_pressed {
+        app.canvas.touch_fling.take().is_some()
+    } else {
+        false
+    };
 
     match app.canvas.touch_mode {
         TouchMode::Idle => {
@@ -2647,17 +2667,24 @@ fn touch_pointer(
                     start_time: now,
                     start_pos: p,
                     last_pos: p,
+                    max_dist: 0.0,
+                    stopped_fling,
                 };
                 app.canvas.dragging = false;
             }
         }
-        TouchMode::Pending { start_time, start_pos, last_pos } => {
+        TouchMode::Pending { start_time, start_pos, last_pos, max_dist, stopped_fling } => {
             if is_down && let Some(p) = pointer {
                 let dist = p.distance(start_pos);
-                if dist > 8.0 {
-                    // Finger moved > 8dp: initiate smooth canvas pan/scroll
+                let new_max_dist = max_dist.max(dist);
+                if dist > 12.0 {
+                    // Finger moved > 12dp: transition permanently to scrolling for remainder of gesture
                     app.canvas.dragging = false;
+                    app.canvas.user_focused = false;
                     app.request_ime_hide = true;
+                    if ui.ctx().input(|i| i.viewport_rect().width()) < 600.0 {
+                        app.ui.ribbon_collapsed = true;
+                    }
                     let delta = p - last_pos;
                     let initial_velocity = delta / dt;
                     app.canvas.touch_mode = TouchMode::Scrolling {
@@ -2666,8 +2693,8 @@ fn touch_pointer(
                     };
                     app.canvas.scroll_offset = clamped_scroll(app.canvas.scroll_offset, delta, app.canvas.scroll_max);
                     ui.ctx().request_repaint();
-                } else if now - start_time >= 0.400 {
-                    // Long-press >= 400ms: select word
+                } else if now - start_time >= 0.400 && !stopped_fling && new_max_dist <= 12.0 {
+                    // Long-press >= 400ms without movement: select word and show handles
                     if let Some((page, x, y)) = page_at(rects, layout, scale, start_pos) {
                         let story = app.session.sel.focus.story;
                         if let Some(pos) = layout.hit(page, x, y, story) {
@@ -2687,44 +2714,54 @@ fn touch_pointer(
                         start_time,
                         start_pos,
                         last_pos: p,
+                        max_dist: new_max_dist,
+                        stopped_fling,
                     };
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(20));
                 }
             } else if is_released || !is_down {
                 let tap_pos = pointer.unwrap_or(last_pos);
-                let double_tap = if let Some((last_time, last_p)) = app.canvas.last_tap {
-                    now - last_time < 0.35 && last_p.distance(tap_pos) < 25.0
-                } else {
-                    false
-                };
+                let is_true_tap = !stopped_fling && max_dist < 12.0 && (now - start_time) < 0.250;
 
-                if double_tap {
-                    if let Some((page, x, y)) = page_at(rects, layout, scale, tap_pos) {
-                        let story = app.session.sel.focus.story;
-                        if let Some(pos) = layout.hit(page, x, y, story) {
-                            let pj = serde_json::to_value(&pos).unwrap_or_default();
-                            let _ = app.run("caret.set", json!({"pos": pj}));
-                            let _ = app.run("select.word", json!({}));
-                            app.session.page_hint = page;
-                            app.canvas.caret_visible_since = crate::now_ms();
-                            resp.request_focus();
-                            app.canvas.user_focused = true;
+                if is_true_tap {
+                    let double_tap = if let Some((last_time, last_p)) = app.canvas.last_tap {
+                        now - last_time < 0.35 && last_p.distance(tap_pos) < 25.0
+                    } else {
+                        false
+                    };
+
+                    if double_tap {
+                        if let Some((page, x, y)) = page_at(rects, layout, scale, tap_pos) {
+                            let story = app.session.sel.focus.story;
+                            if let Some(pos) = layout.hit(page, x, y, story) {
+                                let pj = serde_json::to_value(&pos).unwrap_or_default();
+                                let _ = app.run("caret.set", json!({"pos": pj}));
+                                let _ = app.run("select.word", json!({}));
+                                app.session.page_hint = page;
+                                app.canvas.caret_visible_since = crate::now_ms();
+                                resp.request_focus();
+                                app.canvas.user_focused = true;
+                            }
                         }
+                        app.canvas.last_tap = None;
+                    } else {
+                        if let Some((page, x, y)) = page_at(rects, layout, scale, tap_pos) {
+                            let story = app.session.sel.focus.story;
+                            if let Some(pos) = layout.hit(page, x, y, story) {
+                                let pj = serde_json::to_value(&pos).unwrap_or_default();
+                                let _ = app.run("caret.set", json!({"pos": pj}));
+                                app.session.page_hint = page;
+                                app.canvas.caret_visible_since = crate::now_ms();
+                                resp.request_focus();
+                                app.canvas.user_focused = true;
+                            }
+                        }
+                        app.canvas.last_tap = Some((now, tap_pos));
                     }
-                    app.canvas.last_tap = None;
                 } else {
-                    if let Some((page, x, y)) = page_at(rects, layout, scale, tap_pos) {
-                        let story = app.session.sel.focus.story;
-                        if let Some(pos) = layout.hit(page, x, y, story) {
-                            let pj = serde_json::to_value(&pos).unwrap_or_default();
-                            let _ = app.run("caret.set", json!({"pos": pj}));
-                            app.session.page_hint = page;
-                            app.canvas.caret_visible_since = crate::now_ms();
-                            resp.request_focus();
-                            app.canvas.user_focused = true;
-                        }
-                    }
-                    app.canvas.last_tap = Some((now, tap_pos));
+                    // Suppress caret and keyboard when stopping fling or slow hold
+                    app.canvas.user_focused = false;
+                    app.request_ime_hide = true;
                 }
                 app.canvas.touch_mode = TouchMode::Idle;
                 app.canvas.dragging = false;
@@ -2733,6 +2770,8 @@ fn touch_pointer(
         }
         TouchMode::Scrolling { last_pos, velocity } => {
             app.canvas.dragging = false;
+            app.canvas.user_focused = false;
+            app.request_ime_hide = true;
             if is_down && let Some(p) = pointer {
                 let delta = p - last_pos;
                 app.canvas.scroll_offset = clamped_scroll(app.canvas.scroll_offset, delta, app.canvas.scroll_max);

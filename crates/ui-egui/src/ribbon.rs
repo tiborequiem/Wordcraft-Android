@@ -434,7 +434,15 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                                 ui.painter().rect_filled(u, 2.0, t.accent);
                             }
                             if resp.clicked() {
-                                let _ = app.run("ui.tab", json!({"tab": tab}));
+                                let is_phone = ui.ctx().input(|i| i.viewport_rect().width()) < 600.0;
+                                if is_phone && active && tab != "File" {
+                                    app.ui.ribbon_collapsed = !app.ui.ribbon_collapsed;
+                                } else {
+                                    let _ = app.run("ui.tab", json!({"tab": tab}));
+                                    if is_phone {
+                                        app.ui.ribbon_collapsed = false;
+                                    }
+                                }
                             }
                             if resp.double_clicked() && tab != "File" {
                                 let _ = app.run("ui.collapseRibbon", json!({}));
@@ -482,12 +490,18 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     if app.ui.ribbon_collapsed {
         return;
     }
+    let is_phone = ui.ctx().input(|i| i.viewport_rect().width()) < 600.0;
+    let panel_h = if is_phone { 54.0 } else { CONTENT_H + LABEL_H + 10.0 };
     egui::Panel::top("ribbon")
-        .exact_size(CONTENT_H + LABEL_H + 10.0)
+        .exact_size(panel_h)
         .frame(
             egui::Frame::NONE.fill(t.ribbon).inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 4 }).stroke(Stroke::new(1.0, t.border)),
         )
         .show(ui, |ui| {
+            if is_phone {
+                ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+                ui.style_mut().spacing.interact_size = vec2(40.0, 40.0).max(ui.style().spacing.interact_size);
+            }
             // Right-click on the ribbon (outside a button): Customize Ribbon. Registered first, so
             // the buttons drawn over it keep their own clicks.
             // No document open (#1129): every command is greyed out but Help's.
@@ -506,7 +520,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 })
                 .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
+                    ui.spacing_mut().item_spacing = if is_phone { vec2(6.0, 4.0) } else { vec2(2.0, 2.0) };
                     match entry {
                         // Every tab hidden: nothing to show.
                         Some(e) if e.hidden => return,

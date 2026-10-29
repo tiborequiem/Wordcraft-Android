@@ -549,6 +549,42 @@ public final class WordCraftActivity extends GameActivity {
         installDropTarget();
         imeSetup();
         handleIncomingFiles(getIntent());
+        if (Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                new android.window.OnBackInvokedCallback() {
+                    @Override
+                    public void onBackInvoked() {
+                        handleBackPressed();
+                    }
+                }
+            );
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        handleBackPressed();
+    }
+
+    private void handleBackPressed() {
+        try {
+            nativeOnBackPressed();
+        } catch (Throwable e) {
+            Log.e(TAG, "Error dispatching native back press", e);
+            moveTaskToBack(true);
+        }
+    }
+
+    public static native void nativeOnBackPressed();
+
+    public void moveAppToBack() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                moveTaskToBack(true);
+            }
+        });
     }
 
     @Override
